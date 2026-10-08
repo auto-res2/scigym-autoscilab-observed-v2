@@ -1,0 +1,55 @@
+{
+ "design": "d1",
+ "review": {
+  "commit": "ef51f93253ba25eb990fc97da2bfa9f1e6966595",
+  "observed": {
+   "autoscilab-luna": "34ad0015f0cdd2a08bbf355989392f8ce28b371bef5f2350aa977df968977c83"
+  },
+  "inputs_sha256": "68871a7068cfaea50bf1f5ad93c80b446df7d5b3c94d8cb9341c3e68ed2591dd",
+  "model": "vercel_ai_gateway/openai/gpt-6-luna",
+  "findings": [
+   {
+    "kind": "contradiction",
+    "where": "observed: __main__.cli_args / __main__.Loop.run",
+    "statement": "宣言された full run（予算20、SciGym-small 137件）ではなく、観測された実行は sanity run（予算9、1件）である。",
+    "evidence": "観測: `\"mode\": \"sanity\"`; 起動引数: `\"budget\": 9`; `load_dataset` の戻り値は `len: 137` だが `instances` は sanity で1件を返している"
+   },
+   {
+    "kind": "contradiction",
+    "where": "src/model.py:MAX_FIT_POINTS / System.fit_index / CandidateDistribution.compute_disagreement",
+    "statement": "宣言では全時点の候補間食い違いを使うとしているが、コードは10001時点の軌跡から最大50時点だけを食い違い計算に使う。",
+    "evidence": "コード: `MAX_FIT_POINTS = 50`; `index = system.fit_index()`。観測: `n_points` は `10001`"
+   },
+   {
+    "kind": "undeclared",
+    "where": "src/inference.py:Loop.context",
+    "statement": "LLMに提示する各実験の軌跡は全時点ではなく、10001時点から選んだ5時点に制限されている。",
+    "evidence": "コード: `idx = np.unique(np.linspace(0, self.system.n_points - 1, 5)...` の後、`y[j, k]` の値だけをプロンプトに追加"
+   },
+   {
+    "kind": "contradiction",
+    "where": "src/model.py:Reaction.kinetics / build_sbml",
+    "statement": "宣言上の候補速度則は質量作用または Michaelis–Menten だが、コードは Hill 速度則も候補として許可し、SBML化する。",
+    "evidence": "コード: `Kinetics = Literal[\"mass_action\", \"michaelis_menten\", \"hill\"]`; プロンプトにも `hill = sigmoidal` とある"
+   },
+   {
+    "kind": "contradiction",
+    "where": "src/model.py:bootstrap_confidence",
+    "statement": "宣言された確信度は正規化標準偏差から計算するとされるが、コードは予測の対数値に対する標準偏差の平均を正規化せずに1から引いている。",
+    "evidence": "コード: `std = np.nanstd(P, axis=0)`; `1.0 - np.nanmean(std)`"
+   },
+   {
+    "kind": "undeclared",
+    "where": "src/model.py:ReactionSet.reactions",
+    "statement": "候補機構の反応数を最大12に制限しているが、この仮説空間の上限は宣言されていない。",
+    "evidence": "コード: `reactions: list[Reaction] = Field(default_factory=list, max_length=12)`"
+   },
+   {
+    "kind": "undeclared",
+    "where": "src/inference.py:Loop.__init__ / Loop.run",
+    "statement": "実験選択や再フィットに渡す乱数生成器を固定seed 0で初期化しているが、この選択規則は宣言されていない。",
+    "evidence": "コード: `self.rng = np.random.default_rng(0)`; 同じ `self.rng` を `selector.select(..., rng=self.rng)` に渡している"
+   }
+  ]
+ }
+}

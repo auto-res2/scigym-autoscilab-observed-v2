@@ -6,7 +6,8 @@ AIRAS_OBSERVE_DIR/<pid>-<開始時刻>.json へ書き、Makefile が `merge` で
 record の宣言は読まない。観測の範囲が宣言で狭まらないためで、何を宣言と比べるかは gate が決める。
 
 - calls: 関数ごとに 1 項目。対象は実験コード（src/）で定義された関数と、実験コードから直接
-  呼ばれた依存の関数（stdlib、依存同士の呼び出し、`_` で始まる内部名は除く。`__init__` と `__call__` は見る）。項目は呼び出し回数、引数ごとの
+  呼ばれた依存の関数（stdlib、依存同士の呼び出し、`_` で始まる内部名は除く。`__init__` と `__call__` は見る）。項目は呼び出し回数、引数ごと
+  （`args` はリスト。観測された引数名は鍵ではなく `name` に置き、辞書の鍵は全部この記録の語彙にする）の
   「取った値 → 回数」（回数の多い 50 値。異なり数は 1000 まで数え、そこまでは回数も正確。
   数値は min/max、長さのあるものは length_min/max）、先頭 3 回の全引数と戻り値。
   値はスカラー・文字列・要素 20 個以下のコンテナなら中身（200 文字超は型・長さ・sha256。
@@ -16,9 +17,10 @@ record の宣言は読まない。観測の範囲が宣言で狭まらないた�
   （Actions secrets の一覧。ローカルでは ~/.airas/credentials.json のキー）の環境変数から集める
 - src_modules: 実験コードの各ファイルの sha256。そのコードが初めて走った時（import 直後）に
   読むので、後からの書き換えは入らない（.pyc は見ない）。gate が実行コミットの同じファイルと比べる
-- loaded_file_hashes: lock の hash が守らない依存、つまり index 以外（git / URL / ローカル）から入った
-  配布物と site-packages の外（PYTHONPATH に乗せた clone）のモジュールの、ファイルの sha256。gate が
-  record のリポジトリのスナップショットと比べ、上流が原本のまま走ったかを見る
+- loaded_file_hashes: uv.lock が守らないモジュールのファイルの sha256。守られているのは、lock に
+  index（registry）由来として同じ版で載っている配布物だけ。git / URL / ローカル由来、lock に無い
+  追加 install、PYTHONPATH に乗せた clone は全部 hash する。gate が record のリポジトリの
+  スナップショットと比べ、上流が原本のまま走ったかを見る
 - redefinitions: 依存（上流を含む）の名前空間にある名前のうち、定義元が実験コードのもの。
   monkeypatch とクラスの差し替え
 - extensions: 実験コードのクラスのうち stdlib 以外のクラスを継承するもの。基底と override したメソッド名
@@ -384,22 +386,30 @@ def _from_experiment(file: str) -> bool:
     return file.startswith(_EXPERIMENT_CODE)
 
 
-def _unlocked_packages() -> set[str]:
-    """index 以外（git / URL / ローカル）から入った配布物の最上位モジュール名。lock の hash が守らないもの"""
+def _locked_modules() -> set[str]:
+    """uv.lock の hash が守る最上位モジュール名: index（registry）由来として lock に載り、
+    入っている版も同じ配布物のもの。lock が無ければ空（= 全部 hash する）"""
     import importlib.metadata as metadata
+    import tomllib
+
+    def norm(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
 
     found: set[str] = set()
     try:
-        modules_of: dict[str, set[str]] = {}
+        with open(os.path.join(_CWD, "uv.lock"), "rb") as f:
+            lock = tomllib.load(f)
+        locked = {
+            (norm(pkg["name"]), pkg.get("version"))
+            for pkg in lock.get("package", [])
+            if "registry" in pkg.get("source", {})
+        }
         for module, dists in metadata.packages_distributions().items():
-            for d in dists:
-                modules_of.setdefault(d, set()).add(module)
-        for dist in metadata.distributions():
-            if dist.read_text("direct_url.json"):
-                found |= modules_of.get(dist.metadata["Name"], set())
-    except Exception as e:
+            if any((norm(d), metadata.version(d)) in locked for d in dists):
+                found.add(module)
+    except Exception as e:  # lock や metadata が読めなければ守られていない扱い
         if len(_errors) < 100:
-            _errors.append(f"packages: {e!r}")
+            _errors.append(f"lock: {e!r}")
     return found
 
 
@@ -414,13 +424,12 @@ def _dependency_file(cls) -> str | None:
 def _definitions():
     """(loaded_file_hashes, redefinitions)。実験コード以外の全モジュールを見る"""
     hashes, redefined = {}, {}
-    unlocked = _unlocked_packages()
+    locked = _locked_modules()
     for name, mod in list(sys.modules.items()):
         file = getattr(mod, "__file__", None)
-        if not file or file.startswith(_EXPERIMENT_CODE):
+        if not file or file.startswith(_EXPERIMENT_CODE) or file == _SELF:
             continue
-        installed = "site-packages" in file or "dist-packages" in file
-        if not _is_stdlib(file) and (not installed or name.split(".")[0] in unlocked):
+        if not _is_stdlib(file) and name.split(".")[0] not in locked:
             hashes[name] = {"file": file, "sha256": _file_sha(file)}
         for attr, obj in list(vars(mod).items()):
             if attr.startswith("__"):
@@ -505,7 +514,7 @@ def _finish():
     }
     path = os.path.join(_OUT_DIR, f"{os.getpid()}-{int(_started * 1000)}.json")
     with open(path, "w") as f:
-        json.dump(out, f, ensure_ascii=False, default=str, separators=(",", ":"))
+        json.dump(out, f, ensure_ascii=False, default=str, indent=1)
 
 
 def install() -> None:
@@ -566,11 +575,13 @@ def merge(d: str, run_id: str, out: str) -> None:
             a["type"] = "|".join(sorted(a.pop("types")))
             a["distinct"] = min(len(a["values"]), _DISTINCT)
             a["values"] = sorted(a["values"].values(), key=lambda e: -e["calls"])[:_VALUES]
+        # 観測された引数名を鍵にしない: 鍵はこの記録の語彙だけ、名前は name に
+        fn["args"] = [{"name": name, **a} for name, a in fn["args"].items()]
     if "spawns" in merged.get("reaches", {}):
         merged["reaches"]["spawns"] = list(merged["reaches"]["spawns"].values())
     merged["processes"] = [p["process"] for p in processes]
     with open(out, "w") as f:
-        json.dump(merged, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(merged, f, ensure_ascii=False, indent=1)
 
 
 if __name__ == "__main__":  # python3 sitecustomize.py merge <dir> <run_id> <out>

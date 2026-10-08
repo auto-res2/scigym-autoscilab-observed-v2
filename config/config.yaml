@@ -1,18 +1,6 @@
-# Main configuration for Hydra
-# This file will be populated by AI code generator based on experimental design
-
-defaults:
-  - _self_
-  - run: ???  # loads from config/run/, accessible as 'run=' in CLI
-
-# Execution mode: full, sanity, or pilot
 mode: full
-
-# Results output directory
 results_dir: .research/results
 
-# WandB configuration (will be set by AI agent)
-wandb:
-  entity: ???
-  project: ???
-  mode: online
+data_root: data/scigym_sbml  # small / large の親。run の yaml の split で選ぶ。無ければ HuggingFace（h4duan/scigym-sbml）から取得
+base_url: https://ai-gateway.vercel.sh/v1
+instance_timeout: 14400  # 1 件 1 試行の上限秒。超えたら最初からやり直す

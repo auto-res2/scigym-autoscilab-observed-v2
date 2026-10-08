@@ -1,0 +1,9 @@
+method: react  # SciGym 公式 Controller（ReAct）
+split: small
+model: openai/gpt-6-luna
+max_iterations: 20
+eval_debug_rounds: 3
+temperature: 1.0
+max_tokens: 32768
+workers: 16
+stall_timeout: 3600  # 出力が止まってからこの秒数で試行を打ち切る（LLM のコードが ODE の C ライブラリ内で止まった件。Controller は反復ごとに出力する）

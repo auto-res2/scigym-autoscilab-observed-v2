@@ -1,0 +1,20 @@
+method: autoscilab  # LLM-AutoSciLab の SciGym 用ループ
+split: small
+large_model: openai/gpt-6-luna
+small_model: meta/llama-3.1-8b
+budget: 20  # 正解モデルへの問い合わせ回数
+experiments_per_iter: 4
+acquisition: disagreement  # 仮説条件付き獲得
+ensemble_k: 5
+ensemble_k_max: 20
+ensemble_stability_threshold: 0.1
+ensemble_temperature: 1.0
+ensemble_max_tokens: 4096
+large_max_tokens: 8192
+n_candidates: 2000
+diversity_weight: 0.3
+confidence_threshold: 0.9
+n_bootstrap: 3
+concentration_bounds_factor: [0.2, 5.0]  # 実験で設定してよい初期濃度の範囲（既定値の倍率）
+workers: 16
+stall_timeout: 900  # 出力が止まってからこの秒数で試行を打ち切る。ループは反復ごと（2〜3 分）に出力する

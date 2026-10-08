@@ -1,4 +1,4 @@
-"""`make run` が起動した Python プロセスの実行記録（version 2）。
+"""`make run` が起動した Python プロセスの実行記録（version 3）。
 
 Makefile が PYTHONPATH にこのディレクトリを足すので、Python はどのコードより先に
 このファイルを import する。AIRAS_OBSERVE_DIR が無ければ何もしない。終了時に
@@ -10,11 +10,12 @@ record の宣言は読まない。観測の範囲が宣言で狭まらないた�
   （`args` はリスト。観測された引数名は鍵ではなく `name` に置き、辞書の鍵は全部この記録の語彙にする）の
   「取った値 → 回数」（回数の多い 50 値。異なり数は 1000 まで数え、そこまでは回数も正確。
   数値は min/max、長さのあるものは length_min/max）、先頭 3 回の全引数と戻り値。
-  値はスカラー・文字列・要素 20 個以下のコンテナなら中身（200 文字超は型・長さ・sha256。
-  メモリアドレス入りの repr は型だけ）、それより大きいものは型と長さだけ。
-  秘密の値を含む文字列は `{"redacted": <環境変数名>, "len": n}` に、鍵の形（sk- / ghp_ / hf_ /
-  AKIA / JWT …）は sha256 に置き換える。秘密の値は、基盤が AIRAS_SECRET_NAMES で渡す名前
-  （Actions secrets の一覧。ローカルでは ~/.airas/credentials.json のキー）の環境変数から集める
+  観測した値は 1 件ずつ辞書で書く。`value` があれば本物の値（数・文字列・JSON にできる要素 20 個以下の
+  コンテナ。200 文字まで）。無ければ中身は保存していない: `truncated: true` と型・長さ（文字列と小さい
+  コンテナは sha256 も）、または秘密なら `redacted: <環境変数名>` と長さ。鍵の形（sk- / ghp_ / hf_ /
+  AKIA / JWT …）の文字列も保存しない。秘密の値は、基盤が AIRAS_SECRET_NAMES で渡す名前（Actions secrets の
+  一覧。ローカルでは ~/.airas/credentials.json のキー）の環境変数から集める。大きい配列やオブジェクトは
+  値の一覧に入らず、引数の type と length_min/max だけ残る
 - src_modules: 実験コードの各ファイルの sha256。そのコードが初めて走った時（import 直後）に
   読むので、後からの書き換えは入らない（.pyc は見ない）。gate が実行コミットの同じファイルと比べる
 - loaded_file_hashes: uv.lock が守らないモジュールのファイルの sha256。守られているのは、lock に
@@ -27,7 +28,7 @@ record の宣言は読まない。観測の範囲が宣言で狭まらないた�
 - reaches: 実験コードが起点の open（インタプリタと依存の配下は除く。一時ディレクトリはディレクトリに
   畳む）、connect、名前解決、実験コードが起動した（または python の）子プロセス、実験コードによる
   環境変数の変更、実験コードが直接呼んだ exec / eval、このフックを外す操作。回数で集約
-- process: argv、Python 版、起動時の環境変数（値は引数と同じ規則）
+- process: argv、Python 版、起動時の環境変数（name と、引数と同じ規則の値）
 """
 
 import atexit
@@ -127,37 +128,55 @@ def _relative(file: str) -> str:
     return os.path.relpath(file, _CWD) if file.startswith(_CWD + os.sep) else file
 
 
-def _to_json_value(v, name=""):
-    """name は引数名か環境変数名。秘密の名前の値と、秘密の値を含む文字列は伏せる"""
+def _json_safe(v) -> bool:
+    """JSON にして元に戻せるか。文字列でない辞書の鍵は json.dumps が文字列に潰すので除く"""
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _json_safe(x) for k, x in v.items())
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return all(_json_safe(x) for x in v)
+    return True
+
+
+def _item(v, name: str = "") -> dict:
+    """観測した値 1 件の記録。value があれば本物の値、無ければ中身は保存していない（docstring 参照）。
+    name は引数名か環境変数名。中身を保存しない大きいものは repr も取らない（ホットループで重い）"""
     if v is None or isinstance(v, (bool, int, float)):
-        return v
-    try:
-        r = v if isinstance(v, str) else repr(v)
-    except Exception:
-        r = "<unrepr>"
-    secret = name if name in _SECRET_NAMES else None
-    if secret is None:
-        secret = next((n for s, n in _SECRET_VALUES.items() if s in r), None)
-    if secret is not None:
-        return {"redacted": secret, "len": len(r)}
+        return {"value": v}
+    text, value = None, None
     if isinstance(v, str):
-        if len(v) <= 200 and not _KEY_LIKE.search(v):
-            return v
-        return {"type": "str", "len": len(v), "sha256": _sha(v.encode())}
-    if " at 0x" in r:  # メモリアドレスは再現不能なので型だけ
-        return {"type": type(v).__name__}
-    if len(r) <= 200 and not _KEY_LIKE.search(r):
-        return {"type": type(v).__name__, "repr": r}
-    return {"type": type(v).__name__, "len": len(r), "sha256": _sha(r.encode())}
-
-
-def _value(v, name: str):
-    """集計に使う値。中身を見るのはスカラー・文字列・小さいコンテナまで。大きい配列の repr は取らない"""
-    if v is None or isinstance(v, (bool, int, float, str)):
-        return _to_json_value(v, name)
-    if isinstance(v, (list, tuple, dict, set, frozenset)) and len(v) <= _SMALL:
-        return _to_json_value(v, name)
-    return {"type": type(v).__name__}
+        text = value = v
+    elif isinstance(v, (list, tuple, set, frozenset, dict)) and len(v) <= _SMALL and _json_safe(v):
+        try:
+            value = sorted(v, key=repr) if isinstance(v, (set, frozenset)) else v
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)  # gate と同じ正規形で hash する
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            text = value = None
+    if text is not None:
+        secret = name if name in _SECRET_NAMES else None
+        if secret is None:
+            # コンテナの中の秘密は JSON でエスケープされているので、その形でも探す
+            secret = next(
+                (
+                    n
+                    for sv, n in _SECRET_VALUES.items()
+                    if sv in text or json.dumps(sv, ensure_ascii=False)[1:-1] in text
+                ),
+                None,
+            )
+        if secret is not None:
+            return {"redacted": secret, "len": len(text)}
+        if len(text) <= 200 and not _KEY_LIKE.search(text):
+            return {"value": value}
+    item: dict = {"truncated": True, "type": type(v).__name__}
+    if hasattr(v, "__len__"):
+        try:
+            item["len"] = len(v)
+        except Exception:
+            pass
+    if text is not None:
+        item["sha256"] = _sha(text.encode())
+    return item
 
 
 def _where():
@@ -196,8 +215,8 @@ def _classify(code) -> str:
     return "dep"
 
 
-def _note(a: dict, v, name: str) -> None:
-    """引数 1 つの集計"""
+def _note(a: dict, v, name: str) -> dict:
+    """引数 1 つの集計。記録した item を返す"""
     a["calls"] += 1
     t = type(v).__name__
     a["types"][t] = a["types"].get(t, 0) + 1
@@ -211,12 +230,14 @@ def _note(a: dict, v, name: str) -> None:
             a["length_max"] = n if "length_max" not in a else max(a["length_max"], n)
         except Exception:
             pass
-    rec = _value(v, name)
-    key = json.dumps(rec, sort_keys=True, ensure_ascii=False)
-    if key in a["values"]:
-        a["values"][key]["calls"] += 1
-    elif len(a["values"]) < _DISTINCT:
-        a["values"][key] = {"value": rec, "calls": 1}
+    item = _item(v, name)
+    if "value" in item or "sha256" in item or "redacted" in item:  # 型だけの item は数えない
+        key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        if key in a["values"]:
+            a["values"][key]["calls"] += 1
+        elif len(a["values"]) < _DISTINCT:
+            a["values"][key] = {**item, "calls": 1}
+    return item
 
 
 def _profile(frame, event, arg):
@@ -260,7 +281,7 @@ def _profile(frame, event, arg):
             if code.co_flags & 0x08:
                 names.append(code.co_varnames[n])
             loc = frame.f_locals
-            sample: dict = {}
+            sample: list = []
             for k in names:
                 if k not in loc or k == "self":
                     continue
@@ -270,9 +291,9 @@ def _profile(frame, event, arg):
                 a = fn["args"].get(k)
                 if a is None:
                     a = fn["args"][k] = {"calls": 0, "types": {}, "values": {}}
-                _note(a, v, k)
+                item = _note(a, v, k)
                 if sampling:
-                    sample[k] = _to_json_value(v, k)
+                    sample.append({"name": k, **item})
             if sampling:
                 rec = {"args": sample}
                 fn["samples"].append(rec)
@@ -281,7 +302,7 @@ def _profile(frame, event, arg):
         elif event == "return":
             rec = _active.pop(id(frame), None)
             if rec is not None:
-                rec["ret"] = _to_json_value(arg)
+                rec["ret"] = _item(arg)
     except Exception as e:  # 観測の不具合で run を止めない
         if len(_errors) < 100:
             _errors.append(f"profile {event}: {e!r}")
@@ -484,7 +505,7 @@ def _extensions() -> dict:
 def _finish():
     hashes, redefined = _definitions()
     out = {
-        "version": 2,
+        "version": 3,
         "hook": {"sha256": _file_sha(_SELF)},  # 誰が観察したか
         "process": {
             "pid": os.getpid(),
@@ -492,7 +513,7 @@ def _finish():
             "argv": sys.argv,
             "cwd": _CWD,
             "python": sys.version.split()[0],
-            "env": {k: _to_json_value(v, k) for k, v in sorted(os.environ.items())},
+            "env": [{"name": k, **_item(v, k)} for k, v in sorted(os.environ.items())],
             "started": _started,
             "ended": time.time(),
         },
@@ -530,7 +551,7 @@ def install() -> None:
 def _add(dst: dict, src: dict) -> None:
     """記録を足す。回数は和、min/max はその通り、辞書は再帰、samples と tamper は連結、他は先勝ち"""
     for k, v in src.items():
-        if k not in dst or k == "value":
+        if k not in dst or k in ("value", "len"):
             dst.setdefault(k, v)
         elif isinstance(v, dict):
             _add(dst[k], v)
@@ -555,7 +576,7 @@ def merge(d: str, run_id: str, out: str) -> None:
         (json.load(open(f)) for f in glob.glob(d + "/*.json")),
         key=lambda p: p["process"]["started"],
     )
-    merged: dict = {"version": 2, "run_id": run_id}
+    merged: dict = {"version": 3, "run_id": run_id}
     for p in processes:
         p.pop("version", None)
         process = p.pop("process")
@@ -573,8 +594,10 @@ def merge(d: str, run_id: str, out: str) -> None:
         fn["samples"] = fn["samples"][:_SAMPLES]
         for a in fn["args"].values():
             a["type"] = "|".join(sorted(a.pop("types")))
-            a["distinct"] = min(len(a["values"]), _DISTINCT)
-            a["values"] = sorted(a["values"].values(), key=lambda e: -e["calls"])[:_VALUES]
+            values = a.pop("values")
+            if values:  # 型だけの引数（大きい配列やオブジェクト）には値の一覧が無い
+                a["distinct"] = min(len(values), _DISTINCT)
+                a["values"] = sorted(values.values(), key=lambda e: -e["calls"])[:_VALUES]
         # 観測された引数名を鍵にしない: 鍵はこの記録の語彙だけ、名前は name に
         fn["args"] = [{"name": name, **a} for name, a in fn["args"].items()]
     if "spawns" in merged.get("reaches", {}):
